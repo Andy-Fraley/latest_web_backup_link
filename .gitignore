@@ -1,6 +1,6 @@
 # Files with private settings (passwords, etc.)
 util/settings.py
-retrieve_web_backup.ini
+latest_web_backup_link.ini
 
 # Any files in local tmp directory
 tmp/
