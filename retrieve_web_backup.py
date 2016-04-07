@@ -18,198 +18,55 @@ import pytz
 # Fake class only for purpose of limiting global namespace to the 'g' object
 class g:
     args = None
-    program_filename = None
-    temp_directory = None
+    output_directory = None
     message_output_filename = None
     aws_access_key_id = None
     aws_secret_access_key = None
     aws_region_name = None
     aws_s3_bucket_name = None
-    reuse_output_filename = None
-    backup_data_sets_dict = None
-    run_util_errors = None
 
 
 def main(argv):
     global g
 
-    # Determine which data sets we're backing up
-    g.backup_data_sets_dict = {
-        'individuals': [True, None],
-        'groups': [True, 'participants'],
-        'attendance': [True, 'events'],
-        'pledges': [True, None],
-        'contributions': [True, None]
-    }
-    backup_data_sets_str = ' '.join([x.upper() for x in g.backup_data_sets_dict])
-
     parser = argparse.ArgumentParser()
-    parser.add_argument('--output-filename', required=False,
-        help='Output ZIP filename. Defaults to ./tmp/ccb_backup_[datetime_stamp].zip')
+    parser.add_argument('--output-directory', required=False, help='Output directory where web files are unpacked. ' +
+        'Typically /var/www/html is specified, but defaults to current working directory.')
     parser.add_argument('--message-output-filename', required=False, help='Filename of message output file. If ' +
         'unspecified, then messages are written to stderr as well as into the messages_[datetime_stamp].log file ' +
         'that is zipped into the resulting backup file.')
-    parser.add_argument('--post-to-s3', action='store_true', help='If specified, then the created zip file is ' +
-        'posted to Amazon AWS S3 bucket (using bucket URL and password in ccb_backup.ini file)')
-    parser.add_argument('--delete-zip', action='store_true', help='If specified, then the created zip file is ' +
-        'deleted after posting to S3')
-    parser.add_argument('--source-directory', required=False, help='If provided, then get_*.py utilities are not ' +
-        'executed to create new output data, but instead files in this specified directory are used ' +
-        'to zip and optionally post to AWS S3')
-    parser.add_argument('--retain-temp-directory', action='store_true', help='If specified, the temp directory ' +
-        'without output from get_*.py utilities is not deleted')
-    parser.add_argument('--show-backups-to-do', action='store_true', help='If specified, the ONLY thing that is ' +
-        'done is backup posts and deletions to S3 are calculated and displayed')
-    parser.add_argument('--all-time', action='store_true', help='Normally, attendance data is only archived for ' + \
-        'current year (figuring earlier backups covered earlier years). But specifying this flag, collects ' \
-        'attendance data not just for this year but across all years')
-    parser.add_argument('--backup-data-sets', required=False, nargs='*', default=argparse.SUPPRESS,
-        help='If unspecified, *all* CCB data is backed up. If specified then one or more of the following ' \
-        'data sets must be specified and only the specified data sets are backed up: ' + backup_data_sets_str)
-    parser.add_argument('--zip-file-password', required=False, help='If provided, overrides password used to encryt ' \
-        'zip file that is created that was specified in ccb_backup.ini')
-    parser.add_argument('--aws-s3-bucket-name', required=False, help='If provided, overrides AWS S3 bucket where ' \
-        'output backup zip files are stored')
-    parser.add_argument('--notification-emails', required=False, nargs='*', default=argparse.SUPPRESS,
-        help='If specified, list of email addresses that are emailed upon successful upload to AWS S3, along with ' \
-        'accessor link to get at the backup zip file (which is encrypted)')
 
     g.args = parser.parse_args()
 
     g.program_filename = os.path.basename(__file__)
     if g.program_filename[-3:] == '.py':
-                g.program_filename = g.program_filename[:-3]
+        g.program_filename = g.program_filename[:-3]
 
     message_level = util.get_ini_setting('logging', 'level')
 
-    g.temp_directory = tempfile.mkdtemp(prefix='ccb_backup_')
+    g.temp_directory = tempfile.mkdtemp(prefix='retrieve_web_backup_')
 
-    if g.args.message_output_filename is None:
-        g.message_output_filename = g.temp_directory + '/messages_' + \
-            datetime.datetime.now().strftime('%Y%m%d%H%M%S') + '.log'
-    else:
-        g.message_output_filename = g.args.message_output_filename
+    g.message_output_filename = g.temp_directory + '/messages_' + datetime.datetime.now().strftime('%Y%m%d%H%M%S') + \
+        '.log'
 
     util.set_logger(message_level, g.message_output_filename, os.path.basename(__file__))
-
-    # If specified, validate list of backup_data_sets that we're backing up
-    if 'backup_data_sets' in vars(g.args):
-        # If specifying individual data sets to backup, start assuming we're backing up none of them
-        for data_set_name in g.backup_data_sets_dict:
-            g.backup_data_sets_dict[data_set_name][0] = False
-        for backup_data_set in g.args.backup_data_sets:
-            backup_data_set_str = backup_data_set.lower()
-            if backup_data_set_str not in g.backup_data_sets_dict:
-                message_error("Specified --backup-data-sets value '" + backup_data_set + "' must be one of: " + \
-                    backup_data_sets_str + '. Aborting!')
-                sys.exit(1)
-            else:
-                g.backup_data_sets_dict[backup_data_set_str][0] = True
-
-    # Don't do work that'd just get deleted
-    if not g.args.post_to_s3 and g.args.delete_zip:
-        message_error('Does not make sense to create zip file and delete it without posting to AWS S3. Aborting!')
-        util.sys_exit(1)
 
     # Load AWS creds which are used for checking need for backup and posting backup file
     g.aws_access_key_id = util.get_ini_setting('aws', 'access_key_id', False)
     g.aws_secret_access_key = util.get_ini_setting('aws', 'secret_access_key', False)
     g.aws_region_name = util.get_ini_setting('aws', 'region_name', False)
-    if g.args.aws_s3_bucket_name is not None:
-        g.aws_s3_bucket_name = g.args.aws_s3_bucket_name
+    g.aws_s3_bucket_name = util.get_ini_setting('aws', 's3_bucket_name', False)
+
+    obj_to_retrieve = get_latest_wp_backup()
+    if obj_to_retrieve is not None:
+        backup_file_path = g.temp_directory + '/' + obj_to_retrieve.key.split('/')[1]
+        message_info('Retrieving ' + backup_file_path + '. NOTE - Backup files are *large* and download from S3 ' + \
+            'can take minutes.')
+        obj_to_retrieve.download_file(backup_file_path)
+        message_info(backup_file_path + ' downloaded.')
     else:
-        g.aws_s3_bucket_name = util.get_ini_setting('aws', 's3_bucket_name', False)
-
-    if g.args.zip_file_password is not None:
-        g.zip_file_password = g.args.zip_file_password
-    else:
-        g.zip_file_password = util.get_ini_setting('zip_file', 'password', False)
-
-    # Start with assumption no backups to do
-    backups_to_do = None
-
-    # If user specified just to show work to be done (backups to do), calculate, display, and exit
-    if g.args.show_backups_to_do:
-        backups_to_do = get_backups_to_do()
-        if backups_to_do is None:
-            message_info('Backups in S3 are already up-to-date. Nothing to do')
-            util.sys_exit(0)
-        else:
-            message_info('There are backups/deletions to do')
-            message_info('Backup plan details: ' + str(backups_to_do))
-            util.sys_exit(0)
-
-    # See if there are backups to do
-    backups_to_do = get_backups_to_do()
-
-    # If we're posting to S3 and deleting the ZIP file, then utility has been run only for purpose of
-    # posting to S3. See if there are posts to be done and exit if not
-    if g.args.post_to_s3 and g.args.delete_zip and backups_to_do is None:
-        message_info('Backups in S3 are already up-to-date. Nothing to do. Exiting!')
-        util.sys_exit(0)
-
-
-    # If user specified a directory with set of already-created get_*.py utilities output files to use, then
-    # do not run get_*.py data collection utilities, just use that
-    if g.args.source_directory is not None:
-        g.temp_directory = g.args.source_directory
-    else:
-        # Run get_XXX.py utilities into datetime_stamped CSV output files and messages_output.log output in
-        # temp directory
-        g.run_util_errors = []
-        for data_set_name in g.backup_data_sets_dict:
-            if g.backup_data_sets_dict[data_set_name][0]:
-                run_util(data_set_name, g.backup_data_sets_dict[data_set_name][1])
-        message_info('Finished all data collection')
-
-    # Create output ZIP file
-    if g.args.output_filename is not None:
-        output_filename = g.args.output_filename
-    elif g.args.delete_zip:
-        # We're deleting it when we're done, so we don't care about its location/name. Grab temp filename
-        tmp_file = tempfile.NamedTemporaryFile(prefix='ccb_backup_', suffix='.zip', delete=False)
-        output_filename = tmp_file.name
-        tmp_file.close()
-        os.remove(output_filename)
-        print 'Temp filename: ' + output_filename
-    else:
-        output_filename = './tmp/ccb_backup_' + datetime.datetime.now().strftime('%Y%m%d%H%M%S') + '.zip'
-    exec_zip_list = ['/usr/bin/zip', '-P', g.zip_file_password, '-j', '-r', output_filename, g.temp_directory + '/']
-    message_info('Zipping data collection results files')
-    exit_status = subprocess.call(exec_zip_list)
-    if exit_status == 0:
-        message_info('Successfully zipped get_*.py utilities output and messages log to ' + output_filename)
-    else:
-        message_warning('Error running zip. Exit status ' + str(exit_status))
-
-    # Push ZIP file into appropriate schedule folders (daily, weekly, monthly, etc.) and then delete excess
-    # backups in each folder
-    list_completed_backups = []
-    if 'notification_emails' in vars(g.args):
-        list_notification_emails = g.args.notification_emails
-    else:
-        list_notification_emails = None
-    if backups_to_do is not None:
-        for folder_name in backups_to_do:
-            if backups_to_do[folder_name]['do_backup']:
-                s3_key = upload_to_s3(folder_name, output_filename)
-                expiry_days = {'daily':1, 'weekly':7, 'monthly':31}[folder_name]
-                expiring_url = gen_s3_expiring_url(s3_key, expiry_days)
-                message_info('Backup URL ' + expiring_url + ' is valid for ' + str(expiry_days) + ' days')
-                list_completed_backups.append([folder_name, expiring_url, expiry_days])
-            for item_to_delete in backups_to_do[folder_name]['files_to_delete']:
-                delete_from_s3(item_to_delete)
-        if list_notification_emails is not None:
-            send_email_notification(list_completed_backups, list_notification_emails)
-
-    # If user specified the source directory, don't delete it!  And if user asked not to retain temp directory,
-    # don't delete it!
-    if g.args.source_directory is None:
-        if g.args.retain_temp_directory:
-            message_info('Retained temporary output directory ' + g.temp_directory)
-        else:
-            shutil.rmtree(g.temp_directory)
-            message_info('Temporary output directory deleted')
+        message_error('Error finding latest backup file to retrieve. Aborting!')
+        util.sys_exit(1)
 
     util.sys_exit(0)
 
@@ -229,6 +86,10 @@ def upload_to_s3(folder_name, output_filename):
     bucket.put_object(Key=s3_key, Body=data)
     message_info('Uploaded to S3: ' + s3_key)
     return s3_key
+
+
+def download_from_s3(obj):
+    obj.download_file('tmp.bin')
 
 
 def gen_s3_expiring_url(s3_key, expiry_days):
@@ -267,74 +128,36 @@ def send_email_notification(list_completed_backups, list_notification_emails):
     util.send_email(list_notification_emails, backup_completed_str, body)
 
 
-def get_backups_to_do():
+def get_latest_wp_backup():
     global g
 
-    schedules_by_folder_name = {x['folder_name']:x for x in get_schedules_from_ini()}
     s3 = boto3.resource('s3', aws_access_key_id=g.aws_access_key_id, aws_secret_access_key=g.aws_secret_access_key,
         region_name=g.aws_region_name)
 
     # In S3, folder items end with '/', whereas files do not
     file_items = [item for item in s3.Bucket(g.aws_s3_bucket_name).objects.all() if item.key[-1] != '/']
     files_per_folder_dict = {}
+    newest_sortable_str = ''
+    obj_to_retrieve = None
     for file_item in file_items:
         path_sects = file_item.key.split('/')
         if len(path_sects) == 2:
-            if path_sects[0] in schedules_by_folder_name:
+            if path_sects[0] == 'daily':
                 filename = path_sects[1]
-                match = re.match('([0-9]{14})\.zip', filename)
+                match = re.match('backwpup_[0-9a-f]{6}_(?P<year>[0-9]{4})-(?P<month>[0-9]{2})-(?P<day>[0-9]{2})' + \
+                    '_(?P<hours>[0-9]{2})-(?P<minutes>[0-9]{2})-(?P<seconds>[0-9]{2})\.tar\.gz', filename)
                 if match is not None:
-                    valid_date = True
-                    try:
-                        datetime.datetime.strptime(match.group(1), '%Y%m%d%H%M%S')
-                    except:
-                        valid_date = False
-                    if valid_date:
-                        if path_sects[0] not in files_per_folder_dict:
-                            files_per_folder_dict[path_sects[0]] = [file_item]
-                        else:
-                            files_per_folder_dict[path_sects[0]].append(file_item)
-                    else:
-                        message_info('ZIP file with invalid datetime format...ignoring: ' + file_item.key)
+                    sortable_str = match.group('year') + match.group('month') + match.group('day') + \
+                        match.group('hours') + match.group('minutes') + match.group('seconds')
+                    if sortable_str > newest_sortable_str:
+                        newest_sortable_str = sortable_str
+                        obj_to_retrieve = file_item
                 else:
-                    message_info('Unrecognized file in backup folder...ignoring: ' + file_item.key)
-            else:
-                message_info('Unrecognized folder or file in ccb_backups S3 bucket...ignoring: ' + file_item.key)
+                    message_info("Unrecognized file in 'daily' backup folder...ignoring: " + file_item.key)
         else:
-            message_info('Unrecognized folder or file in ccb_backups S3 bucket with long path...ignoring: ' +
+            message_info('Unrecognized folder or file in website_backups S3 bucket with long path...ignoring: ' +
                 file_item.key)
-    backups_to_post_dict = {}
-    for folder_name in schedules_by_folder_name:
-        num_files_to_keep = schedules_by_folder_name[folder_name]['num_files_to_keep']
-        files_to_delete = []
-        do_backup = True
-        if folder_name in files_per_folder_dict:
-            sorted_by_last_modified_list = sorted(files_per_folder_dict[folder_name], key=lambda x: x.last_modified)
-            num_files = len(sorted_by_last_modified_list)
-            if schedules_by_folder_name[folder_name]['backup_after_datetime'] < \
-               sorted_by_last_modified_list[num_files - 1].last_modified:
-                do_backup = False
-                message_info(folder_name + ': ' + \
-                    str(schedules_by_folder_name[folder_name]['backup_after_datetime']) + ' < ' + \
-                    str(sorted_by_last_modified_list[num_files - 1].last_modified) + ', no backup to do')
-            else:
-                message_info(folder_name + ': ' + \
-                    str(schedules_by_folder_name[folder_name]['backup_after_datetime']) + ' > ' + \
-                    str(sorted_by_last_modified_list[num_files - 1].last_modified) + ', doing backup')
-            # TODO deleted 2 out of weekly, should have deleted 3
-            if num_files_to_keep > 0 and num_files >= num_files_to_keep:
-                if do_backup:
-                    kicker = 1
-                else:
-                    kicker = 0
-                if num_files - num_files_to_keep + kicker > 0:
-                    files_to_delete = sorted_by_last_modified_list[0:num_files - num_files_to_keep + kicker]
-        if do_backup or len(files_to_delete) > 0:
-            backups_to_post_dict[folder_name] = {'do_backup': do_backup, 'files_to_delete': files_to_delete}
-    if len(backups_to_post_dict) > 0:
-        return backups_to_post_dict
-    else:
-        return None
+    return s3.Bucket(g.aws_s3_bucket_name).Object(obj_to_retrieve.key)
 
 
 def get_schedules_from_ini():
