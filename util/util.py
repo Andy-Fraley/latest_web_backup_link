@@ -7,10 +7,11 @@ import logging
 
 
 def get_ini_setting(section, option, none_allowable=True):
-    config_file_path = os.path.abspath(os.path.dirname(os.path.abspath(__file__)) + '/../retrieve_web_backup.ini')
+    config_file_path = os.path.abspath(os.path.dirname(os.path.abspath(__file__)) + '/../latest_web_backup_link.ini')
     if not os.path.isfile(config_file_path):
         logging.error("Required ini file '" + config_file_path +
-            "' is missing. Clone file 'retrieve_web_backup__sample.ini' to create file 'retrieve_web_backup.ini'")
+            "' is missing. Clone file 'latest_web_backup_link__sample.ini' to create file " + \
+            "'latest_web_backup_link.ini'")
         sys.exit(1)
     config_parser = ConfigParser.ConfigParser()
     config_parser.read(config_file_path)
@@ -21,7 +22,7 @@ def get_ini_setting(section, option, none_allowable=True):
     if ret_val == '':
         ret_val = None
     if not none_allowable and ret_val == None:
-        logging.error("Required setting in retrieve_web_backup.ini '[" + section + ']' + option +
+        logging.error("Required setting in latest_web_backup_link.ini '[" + section + ']' + option +
             "' cannot be missing or blank")
         sys.exit(1)
     return ret_val
